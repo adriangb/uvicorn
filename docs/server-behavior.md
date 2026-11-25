@@ -74,6 +74,17 @@ Uvicorn provides the following resource limiting:
 * Backlog (`--backlog`). Defaults to `2048`. The maximum number of connections the operating system will hold in the socket's accept queue before the worker accepts them. This is passed straight to the listening socket's `listen()` call.
 * Max requests (`--limit-max-requests`). Defaults to `None`. If set, this provides a maximum number of HTTP requests that will be serviced before terminating a process. Together with a process manager this can be used to prevent memory leaks from impacting long running processes.
 
+### Connection limits
+
+A client with a long-lived keep-alive connection stays pinned to one process: replicas added after a scale-up receive none of its traffic. `--limit-connection-max-age` and `--limit-connection-max-requests` make connections reconnect regularly, without failing any request:
+
+* The response that crosses a limit carries `Connection: close`, and the connection closes once it is sent. On HTTP/2, the connection sends `GOAWAY` instead, lets the streams already open finish, then closes.
+* A request in flight is never interrupted.
+* An idle connection past its maximum age is not closed while idle, since the client may be sending a request on it at that moment. It closes after its next response, or when `--timeout-keep-alive` expires, whichever comes first.
+* The maximum age of each connection is shortened by a random jitter of up to 10%.
+
+Both are off by default.
+
 ### Concurrency and backlog
 
 `--limit-concurrency` and `--backlog` operate at different layers and do not interact. It is a common misconception that requests refused by `--limit-concurrency` are held in the `--backlog`; they are not.

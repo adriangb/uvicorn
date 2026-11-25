@@ -20,7 +20,8 @@ from uvicorn._types import (
 )
 from uvicorn.config import Config
 from uvicorn.logging import TRACE_LOG_LEVEL
-from uvicorn.protocols.http.flow_control import HIGH_WATER_LIMIT, FlowControl, service_unavailable
+from uvicorn.protocols.http.connection_limits import ConnectionLimits
+from uvicorn.protocols.http.flow_control import CLOSE_HEADER, HIGH_WATER_LIMIT, FlowControl, service_unavailable
 from uvicorn.protocols.utils import get_client_addr, get_local_addr, get_path_with_query_string, get_remote_addr, is_ssl
 from uvicorn.server import ServerState
 
@@ -52,6 +53,7 @@ class ZttpProtocol(asyncio.Protocol):
         # Timeouts
         self.timeout_keep_alive_task: asyncio.TimerHandle | None = None
         self.timeout_keep_alive = config.timeout_keep_alive
+        self.connection_limits = ConnectionLimits(config)
 
         # Shared server state
         self.server_state = server_state
@@ -197,6 +199,7 @@ class ZttpProtocol(asyncio.Protocol):
                     default_headers=self.server_state.default_headers,
                     message_event=asyncio.Event(),
                     expect_100_continue=event.expect_continue,
+                    connection_limits=self.connection_limits,
                     on_response=self.on_response_complete,
                 )
                 if event.end_stream:
@@ -329,6 +332,7 @@ class RequestResponseCycle:
         default_headers: list[tuple[bytes, bytes]],
         message_event: asyncio.Event,
         expect_100_continue: bool,
+        connection_limits: ConnectionLimits,
         on_response: Callable[..., None],
     ) -> None:
         self.scope = scope
@@ -340,6 +344,7 @@ class RequestResponseCycle:
         self.access_log = access_log
         self.default_headers = default_headers
         self.message_event = message_event
+        self.connection_limits = connection_limits
         self.on_response = on_response
 
         # Connection state
@@ -431,11 +436,17 @@ class RequestResponseCycle:
             if status < 200 or status == 204:
                 headers = [(name, value) for name, value in headers if name.lower() != b"transfer-encoding"]
 
+            if self.connection_limits.response_started():
+                self.keep_alive = False
+
             has_content_length = False
             has_transfer_encoding = False
+            has_connection_close = False
             for name, value in headers:
                 name = name.lower()
-                if name == b"content-length":
+                if name == b"connection":
+                    has_connection_close |= b"close" in [token.strip().lower() for token in value.split(b",")]
+                elif name == b"content-length":
                     has_content_length = True
                     self.expected_content_length = int(value.decode())
                 elif name == b"transfer-encoding":
@@ -451,6 +462,9 @@ class RequestResponseCycle:
                 headers = [(name, value) for name, value in headers if name.lower() != b"content-length"]
                 has_content_length = False
                 self.expected_content_length = 0
+
+            if not self.keep_alive and not has_connection_close:
+                headers = headers + [CLOSE_HEADER]
 
             # zttp refuses to frame the body unless the response declares
             # Content-Length or Transfer-Encoding, so add chunked encoding

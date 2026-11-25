@@ -891,6 +891,40 @@ async def test_shutdown_during_request(http_protocol_cls: type[HTTPProtocol]):
     assert protocol.transport.is_closing()
 
 
+async def test_connection_max_requests_error_response(http_protocol_cls: type[HTTPProtocol]):
+    async def app(scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable):
+        raise RuntimeError()
+
+    protocol = get_connected_protocol(app, http_protocol_cls, limit_connection_max_requests=1)
+    protocol.data_received(SIMPLE_GET_REQUEST)
+    await protocol.loop.run_one()
+    assert b"HTTP/1.1 500 Internal Server Error" in protocol.transport.buffer
+    assert protocol.transport.buffer.lower().count(b"connection: close") == 1
+    assert protocol.transport.is_closing()
+
+
+async def test_connection_max_requests_app_connection_close_header_is_not_duplicated(
+    http_protocol_cls: type[HTTPProtocol],
+):
+    app = Response("Hello, world", media_type="text/plain", headers={"Connection": "close"})
+
+    protocol = get_connected_protocol(app, http_protocol_cls, limit_connection_max_requests=1)
+    protocol.data_received(SIMPLE_GET_REQUEST)
+    await protocol.loop.run_one()
+    assert protocol.transport.buffer.lower().count(b"connection: close") == 1
+    assert protocol.transport.is_closing()
+
+
+async def test_shutdown_during_request_sends_connection_close(http_protocol_cls: type[HTTPProtocol]):
+    app = Response(b"", status_code=204)
+
+    protocol = get_connected_protocol(app, http_protocol_cls)
+    protocol.data_received(SIMPLE_GET_REQUEST)
+    protocol.shutdown()  # type: ignore[attr-defined]
+    await protocol.loop.run_one()
+    assert b"connection: close" in protocol.transport.buffer.lower()
+
+
 async def test_shutdown_during_idle(http_protocol_cls: type[HTTPProtocol]):
     app = Response("Hello, world", media_type="text/plain")
 

@@ -298,6 +298,19 @@ def _parse_headers(ctx: click.Context, param: click.Parameter, value: tuple[str,
     show_default=True,
 )
 @click.option(
+    "--limit-connection-max-age",
+    type=click.FloatRange(min=0),
+    default=None,
+    help="Close each HTTP connection after the first response sent once it is this many seconds old,"
+    " minus a random jitter of up to 10%. In-flight requests are never interrupted.",
+)
+@click.option(
+    "--limit-connection-max-requests",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Close each HTTP connection after it has served this many requests.",
+)
+@click.option(
     "--timeout-keep-alive",
     type=int,
     default=5,
@@ -439,6 +452,8 @@ def main(
     backlog: int,
     limit_max_requests: int,
     limit_max_requests_jitter: int,
+    limit_connection_max_age: float | None,
+    limit_connection_max_requests: int | None,
     timeout_keep_alive: int,
     timeout_graceful_shutdown: int | None,
     timeout_worker_healthcheck: int,
@@ -492,6 +507,8 @@ def main(
         backlog=backlog,
         limit_max_requests=limit_max_requests,
         limit_max_requests_jitter=limit_max_requests_jitter,
+        limit_connection_max_age=limit_connection_max_age,
+        limit_connection_max_requests=limit_connection_max_requests,
         timeout_keep_alive=timeout_keep_alive,
         timeout_graceful_shutdown=timeout_graceful_shutdown,
         timeout_worker_healthcheck=timeout_worker_healthcheck,
@@ -548,6 +565,8 @@ def run(
     backlog: int = 2048,
     limit_max_requests: int | None = None,
     limit_max_requests_jitter: int = 0,
+    limit_connection_max_age: float | None = None,
+    limit_connection_max_requests: int | None = None,
     timeout_keep_alive: int = 5,
     timeout_graceful_shutdown: int | None = None,
     timeout_worker_healthcheck: int = 5,
@@ -605,6 +624,8 @@ def run(
         backlog=backlog,
         limit_max_requests=limit_max_requests,
         limit_max_requests_jitter=limit_max_requests_jitter,
+        limit_connection_max_age=limit_connection_max_age,
+        limit_connection_max_requests=limit_connection_max_requests,
         timeout_keep_alive=timeout_keep_alive,
         timeout_graceful_shutdown=timeout_graceful_shutdown,
         timeout_worker_healthcheck=timeout_worker_healthcheck,

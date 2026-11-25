@@ -21,6 +21,7 @@ from uvicorn._types import (
 )
 from uvicorn.config import Config
 from uvicorn.logging import TRACE_LOG_LEVEL
+from uvicorn.protocols.http.connection_limits import ConnectionLimits
 from uvicorn.protocols.http.flow_control import HIGH_WATER_LIMIT, FlowControl, service_unavailable
 from uvicorn.protocols.utils import get_client_addr, get_local_addr, get_path_with_query_string, get_remote_addr, is_ssl
 from uvicorn.server import ServerState
@@ -73,6 +74,8 @@ class ZttpH2Protocol(asyncio.Protocol):
         self.client: tuple[str, int] | None = None
         self.scheme: Literal["http", "https"] | None = None
         self.shutdown_requested = False
+        self.goaway_sent = False
+        self.connection_limits = ConnectionLimits(config)
 
         # Per-stream state, keyed by HTTP/2 stream id
         self.cycles: dict[int, RequestResponseCycle] = {}
@@ -275,6 +278,12 @@ class ZttpH2Protocol(asyncio.Protocol):
     def on_response_complete(self, stream_id: int) -> None:
         self.server_state.total_requests += 1
         self.cycles.pop(stream_id, None)
+        if self.connection_limits.response_started() and not self.goaway_sent and not self.transport.is_closing():
+            # The connection reached its maximum age or number of requests: tell the
+            # client to open new streams on a new connection. Streams it already
+            # opened still complete, and the connection closes once they have.
+            self.shutdown_requested = True
+            self._send_goaway()
         self.on_stream_closed()
 
     def on_stream_closed(self) -> None:
@@ -299,9 +308,14 @@ class ZttpH2Protocol(asyncio.Protocol):
         """Send GOAWAY and close the transport."""
         if self.transport.is_closing():
             return
+        if not self.goaway_sent:
+            self._send_goaway()
+        self.transport.close()
+
+    def _send_goaway(self) -> None:
+        self.goaway_sent = True
         self.conn.close()
         self.flush()
-        self.transport.close()
 
     def shutdown(self) -> None:
         """

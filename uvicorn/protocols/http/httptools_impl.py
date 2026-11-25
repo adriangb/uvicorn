@@ -22,6 +22,7 @@ from uvicorn._types import (
 )
 from uvicorn.config import Config
 from uvicorn.logging import TRACE_LOG_LEVEL
+from uvicorn.protocols.http.connection_limits import ConnectionLimits
 from uvicorn.protocols.http.flow_control import HIGH_WATER_LIMIT, FlowControl, service_unavailable
 from uvicorn.protocols.utils import get_client_addr, get_local_addr, get_path_with_query_string, get_remote_addr, is_ssl
 from uvicorn.server import ServerState
@@ -76,6 +77,7 @@ class HttpToolsProtocol(asyncio.Protocol):
         # Timeouts
         self.timeout_keep_alive_task: TimerHandle | None = None
         self.timeout_keep_alive = config.timeout_keep_alive
+        self.connection_limits = ConnectionLimits(config)
 
         # Global state
         self.server_state = server_state
@@ -287,6 +289,7 @@ class HttpToolsProtocol(asyncio.Protocol):
             message_event=asyncio.Event(),
             expect_100_continue=self.expect_100_continue,
             keep_alive=http_version != "1.0" and self.parser.should_keep_alive(),
+            connection_limits=self.connection_limits,
             on_response=self.on_response_complete,
         )
         if existing_cycle is None or existing_cycle.response_complete:
@@ -387,6 +390,7 @@ class RequestResponseCycle:
         message_event: asyncio.Event,
         expect_100_continue: bool,
         keep_alive: bool,
+        connection_limits: ConnectionLimits,
         on_response: Callable[..., None],
     ):
         self.scope = scope
@@ -397,6 +401,7 @@ class RequestResponseCycle:
         self.access_log = access_log
         self.default_headers = default_headers
         self.message_event = message_event
+        self.connection_limits = connection_limits
         self.on_response = on_response
 
         # Connection state
@@ -475,6 +480,9 @@ class RequestResponseCycle:
 
             status_code = message["status"]
             headers = self.default_headers + list(message.get("headers", []))
+
+            if self.connection_limits.response_started():
+                self.keep_alive = False
 
             if self.access_log:
                 self.access_logger.info(

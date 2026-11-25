@@ -786,6 +786,40 @@ async def test_shutdown_refuses_new_streams_and_closes_after_last_response():
     assert protocol.transport.is_closing()
 
 
+async def test_connection_max_requests_sends_goaway():
+    release = asyncio.Event()
+
+    async def app(scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable):
+        assert scope["type"] == "http"
+        if scope["path"] == "/slow":
+            await release.wait()
+        await Response("done", media_type="text/plain")(scope, receive, send)
+
+    protocol = get_connected_protocol(app, limit_connection_max_requests=1)
+    client = H2Client()
+
+    slow = client.request(b"GET", b"/slow")
+    fast = client.request(b"GET", b"/")
+    protocol.data_received(client.data_to_send())
+    slow_task = asyncio.get_running_loop().create_task(protocol.loop.run_one())
+    await asyncio.sleep(0)  # Let the slow stream start before the fast one.
+    await protocol.loop.run_one()
+
+    # The first completed stream reaches the limit: GOAWAY goes out, the slow stream still completes.
+    events = client.events(protocol.transport.buffer)
+    goaways = [event for event in events if isinstance(event, zttp.GoAway)]
+    assert [(goaway.last_stream_id, goaway.error_code) for goaway in goaways] == [(fast.stream_id, 0)]
+    assert not protocol.transport.is_closing()
+
+    protocol.transport.clear_buffer()
+    release.set()
+    await slow_task
+    responses = client.parse_responses(protocol.transport.buffer)
+    assert responses[slow.stream_id].body == b"done"
+    assert responses[slow.stream_id].ended
+    assert protocol.transport.is_closing()
+
+
 async def test_goaway_closes_idle_connection():
     app = Response("Hello, world", media_type="text/plain")
     protocol = get_connected_protocol(app)

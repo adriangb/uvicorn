@@ -22,6 +22,7 @@ from uvicorn._types import (
 )
 from uvicorn.config import Config
 from uvicorn.logging import TRACE_LOG_LEVEL
+from uvicorn.protocols.http.connection_limits import ConnectionLimits
 from uvicorn.protocols.http.flow_control import CLOSE_HEADER, HIGH_WATER_LIMIT, FlowControl, service_unavailable
 from uvicorn.protocols.utils import get_client_addr, get_local_addr, get_path_with_query_string, get_remote_addr, is_ssl
 from uvicorn.server import ServerState
@@ -35,6 +36,13 @@ def _get_status_phrase(status_code: int) -> bytes:
 
 
 STATUS_PHRASES = {status_code: _get_status_phrase(status_code) for status_code in range(100, 600)}
+
+
+def _has_connection_close(headers: list[tuple[bytes, bytes]]) -> bool:
+    return any(
+        name.lower() == b"connection" and b"close" in [token.strip().lower() for token in value.split(b",")]
+        for name, value in headers
+    )
 
 
 class H11Protocol(asyncio.Protocol):
@@ -69,6 +77,7 @@ class H11Protocol(asyncio.Protocol):
         # Timeouts
         self.timeout_keep_alive_task: asyncio.TimerHandle | None = None
         self.timeout_keep_alive = config.timeout_keep_alive
+        self.connection_limits = ConnectionLimits(config)
 
         # Shared server state
         self.server_state = server_state
@@ -243,6 +252,7 @@ class H11Protocol(asyncio.Protocol):
                     access_log=self.access_log,
                     default_headers=self.server_state.default_headers,
                     message_event=asyncio.Event(),
+                    connection_limits=self.connection_limits,
                     on_response=self.on_response_complete,
                 )
                 if self.config.reset_contextvars:
@@ -375,6 +385,7 @@ class RequestResponseCycle:
         access_log: bool,
         default_headers: list[tuple[bytes, bytes]],
         message_event: asyncio.Event,
+        connection_limits: ConnectionLimits,
         on_response: Callable[..., None],
     ) -> None:
         self.scope = scope
@@ -386,6 +397,7 @@ class RequestResponseCycle:
         self.access_log = access_log
         self.default_headers = default_headers
         self.message_event = message_event
+        self.connection_limits = connection_limits
         self.on_response = on_response
 
         # Connection state
@@ -466,7 +478,10 @@ class RequestResponseCycle:
             status = message["status"]
             headers = self.default_headers + list(message.get("headers", []))
 
-            if CLOSE_HEADER in self.scope["headers"] and CLOSE_HEADER not in headers:
+            if self.connection_limits.response_started():
+                self.keep_alive = False
+
+            if (not self.keep_alive or CLOSE_HEADER in self.scope["headers"]) and not _has_connection_close(headers):
                 headers = headers + [CLOSE_HEADER]
 
             if self.access_log:
