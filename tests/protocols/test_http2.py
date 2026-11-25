@@ -150,6 +150,7 @@ class MockProtocol(asyncio.Protocol):
     flow: Any
     cycles: dict[int, Any]
     timeout_keep_alive_task: Any
+    server_state: ServerState
 
     def shutdown(self) -> None: ...
 
@@ -783,6 +784,66 @@ async def test_shutdown_refuses_new_streams_and_closes_after_last_response():
     response = client.parse_response(protocol.transport.buffer, stream_id=first.stream_id)
     assert response.status == 200
     assert response.body == b"done"
+    assert protocol.transport.is_closing()
+
+
+async def test_lame_duck_sends_goaway_after_next_response():
+    app = Response("Hello, world", media_type="text/plain")
+    protocol = get_connected_protocol(app)
+    client = H2Client()
+
+    client.request(b"GET", b"/")
+    protocol.data_received(client.data_to_send())
+    await protocol.loop.run_one()
+    client.events(protocol.transport.buffer)
+    protocol.transport.clear_buffer()
+
+    # An idle connection is left alone when lame duck mode starts.
+    protocol.server_state.lame_duck = True
+    assert not protocol.transport.is_closing()
+
+    stream = client.request(b"GET", b"/")
+    protocol.data_received(client.data_to_send())
+    await protocol.loop.run_one()
+    events = client.events(protocol.transport.buffer)
+    goaways = [event for event in events if isinstance(event, zttp.GoAway)]
+    assert [(goaway.last_stream_id, goaway.error_code) for goaway in goaways] == [(stream.stream_id, 0)]
+    assert any(isinstance(event, zttp.EndOfMessage) for event in events)
+    assert protocol.transport.is_closing()
+
+
+async def test_lame_duck_lets_in_flight_streams_finish():
+    release = asyncio.Event()
+
+    async def app(scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable):
+        assert scope["type"] == "http"
+        if scope["path"] == "/slow":
+            await release.wait()
+        await Response("done", media_type="text/plain")(scope, receive, send)
+
+    protocol = get_connected_protocol(app)
+    client = H2Client()
+    protocol.server_state.lame_duck = True
+
+    slow = client.request(b"GET", b"/slow")
+    fast = client.request(b"GET", b"/")
+    protocol.data_received(client.data_to_send())
+    slow_task = asyncio.get_running_loop().create_task(protocol.loop.run_one())
+    await asyncio.sleep(0)  # Let the slow stream start before the fast one.
+    await protocol.loop.run_one()
+
+    # The fast stream completed: GOAWAY went out, but the slow stream keeps the connection open.
+    responses = client.parse_responses(protocol.transport.buffer)
+    assert responses[fast.stream_id].status == 200
+    assert protocol.goaway_sent
+    assert not protocol.transport.is_closing()
+
+    protocol.transport.clear_buffer()
+    release.set()
+    await slow_task
+    responses = client.parse_responses(protocol.transport.buffer)
+    assert responses[slow.stream_id].body == b"done"
+    assert responses[slow.stream_id].ended
     assert protocol.transport.is_closing()
 
 

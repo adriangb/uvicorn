@@ -62,6 +62,9 @@ class ServerState:
         self.connections: set[Protocols] = set()
         self.tasks: set[asyncio.Task[None]] = set()
         self.default_headers: list[tuple[bytes, bytes]] = []
+        # Set by `Server.enter_lame_duck()`. HTTP connections check it when they
+        # write response headers, and close after that response.
+        self.lame_duck = False
 
 
 class Server:
@@ -75,12 +78,42 @@ class Server:
         self.last_notified = 0.0
 
         self._captured_signals: list[int] = []
+        self._lame_duck_signalled = False
+        self._lame_duck_deadline: float | None = None
 
     @functools.cached_property
     def limit_max_requests(self) -> int | None:
         if self.config.limit_max_requests is None:
             return None
         return self.config.limit_max_requests + random.randint(0, self.config.limit_max_requests_jitter)
+
+    @property
+    def lame_duck(self) -> bool:
+        """Whether the server is in lame duck mode. See `enter_lame_duck()`."""
+        return self.server_state.lame_duck
+
+    def enter_lame_duck(self, timeout: float | None = None) -> None:
+        """
+        Enter lame duck mode: keep serving, but ask every client to reconnect.
+
+        The listening sockets stay open and keep accepting connections. Every
+        HTTP/1 response whose headers are written from now on carries
+        `Connection: close`, and its connection closes once it is sent. HTTP/2
+        connections send `GOAWAY` after their next completed response, and close
+        once their in-flight streams finish. Idle keep-alive connections are not
+        closed here: closing a socket the client may be sending a request on
+        races with that request. They close after their next response, or when
+        `timeout_keep_alive` expires.
+
+        If `timeout` is given, the normal graceful shutdown (`should_exit`)
+        starts that many seconds later. Calling this again while already in lame
+        duck mode only sets the timeout, if none was set before.
+        """
+        if not self.server_state.lame_duck:
+            self.server_state.lame_duck = True
+            logger.info("Entering lame duck mode: connections close after their next response.")
+        if timeout is not None and self._lame_duck_deadline is None:
+            self._lame_duck_deadline = time.monotonic() + timeout
 
     def run(self, sockets: list[socket.socket] | None = None) -> None:
         return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
@@ -271,6 +304,13 @@ class Server:
         if self.should_exit:
             return True
 
+        if self._lame_duck_signalled and self._lame_duck_deadline is None:
+            self.enter_lame_duck(timeout=self.config.timeout_lame_duck)
+
+        if self._lame_duck_deadline is not None and time.monotonic() >= self._lame_duck_deadline:
+            logger.info("Lame duck timeout elapsed.")
+            return True
+
         max_requests = self.limit_max_requests
         if max_requests is not None and self.server_state.total_requests >= max_requests:
             logger.info("Maximum request limit of %d exceeded. Terminating process.", max_requests)
@@ -347,6 +387,11 @@ class Server:
 
     def handle_exit(self, sig: int, frame: FrameType | None) -> None:
         self._captured_signals.append(sig)
+        if sig == signal.SIGTERM and self.config.timeout_lame_duck and not self._lame_duck_signalled:
+            # The main loop enters lame duck mode on its next tick: logging is not safe in a
+            # signal handler. A second SIGTERM, or a SIGINT, starts the shutdown right away.
+            self._lame_duck_signalled = True
+            return
         if self.should_exit and sig == signal.SIGINT:
             self.force_exit = True  # pragma: full coverage
         else:

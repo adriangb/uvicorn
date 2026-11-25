@@ -114,6 +114,27 @@ Graceful process shutdowns are particularly important during a restart period. D
 
 Uvicorn handles process shutdown gracefully, ensuring that connections are properly finalized, and all tasks have run to completion. During a shutdown period Uvicorn will ensure that responses and tasks must still complete within the configured timeout periods.
 
+### Lame duck mode
+
+Closing the listening sockets as soon as shutdown starts is a problem behind a load balancer or a Kubernetes `Service`: until the endpoint is deregistered, which takes a few seconds, new connections are still routed to the process and get refused. And clients holding keep-alive connections are never told to go elsewhere.
+
+In lame duck mode, Uvicorn keeps serving and keeps accepting new connections, but asks every client to reconnect:
+
+* Each HTTP/1 response whose headers are written from now on carries `Connection: close`, including the error responses Uvicorn writes itself, and its connection closes once the response is sent. A response whose headers were already sent when lame duck mode started is completed normally, and the connection closes after the *next* response, so no connection closes without telling the client.
+* HTTP/2 connections send `GOAWAY` after their next completed response, let the streams already open finish, then close.
+* Idle keep-alive connections are **not** closed when lame duck mode starts: a client may be sending a request at that very moment, and closing the socket under it would fail that request. They close after their next response, or after `--timeout-keep-alive`.
+* In-flight requests are never interrupted.
+
+Start it with `--timeout-lame-duck <seconds>`: the first `SIGTERM` enters lame duck mode, and the usual graceful shutdown starts once the timeout elapses (or on a second `SIGTERM`). With Kubernetes, set it a little longer than the time your endpoints take to be removed, and keep `terminationGracePeriodSeconds` above it plus `--timeout-graceful-shutdown`.
+
+When running Uvicorn programmatically, call `Server.enter_lame_duck()`, optionally with a `timeout` after which the shutdown starts; `Server.lame_duck` tells whether it is active:
+
+```python
+server = uvicorn.Server(config)
+...
+server.enter_lame_duck(timeout=10)
+```
+
 ---
 
 ## HTTP Pipelining

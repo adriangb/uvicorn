@@ -37,6 +37,13 @@ def _get_status_phrase(status_code: int) -> bytes:
 STATUS_PHRASES = {status_code: _get_status_phrase(status_code) for status_code in range(100, 600)}
 
 
+def _has_connection_close(headers: list[tuple[bytes, bytes]]) -> bool:
+    return any(
+        name.lower() == b"connection" and b"close" in [token.strip().lower() for token in value.split(b",")]
+        for name, value in headers
+    )
+
+
 class H11Protocol(asyncio.Protocol):
     def __init__(
         self,
@@ -241,7 +248,7 @@ class H11Protocol(asyncio.Protocol):
                     logger=self.logger,
                     access_logger=self.access_logger,
                     access_log=self.access_log,
-                    default_headers=self.server_state.default_headers,
+                    server_state=self.server_state,
                     message_event=asyncio.Event(),
                     on_response=self.on_response_complete,
                 )
@@ -373,7 +380,7 @@ class RequestResponseCycle:
         logger: logging.Logger,
         access_logger: logging.Logger,
         access_log: bool,
-        default_headers: list[tuple[bytes, bytes]],
+        server_state: ServerState,
         message_event: asyncio.Event,
         on_response: Callable[..., None],
     ) -> None:
@@ -384,7 +391,8 @@ class RequestResponseCycle:
         self.logger = logger
         self.access_logger = access_logger
         self.access_log = access_log
-        self.default_headers = default_headers
+        self.server_state = server_state
+        self.default_headers = server_state.default_headers
         self.message_event = message_event
         self.on_response = on_response
 
@@ -466,7 +474,10 @@ class RequestResponseCycle:
             status = message["status"]
             headers = self.default_headers + list(message.get("headers", []))
 
-            if CLOSE_HEADER in self.scope["headers"] and CLOSE_HEADER not in headers:
+            if self.server_state.lame_duck:
+                self.keep_alive = False
+
+            if (not self.keep_alive or CLOSE_HEADER in self.scope["headers"]) and not _has_connection_close(headers):
                 headers = headers + [CLOSE_HEADER]
 
             if self.access_log:

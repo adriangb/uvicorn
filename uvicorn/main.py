@@ -311,6 +311,14 @@ def _parse_headers(ctx: click.Context, param: click.Parameter, value: tuple[str,
     help="Maximum number of seconds to wait for graceful shutdown.",
 )
 @click.option(
+    "--timeout-lame-duck",
+    type=click.FloatRange(min=0),
+    default=0,
+    help="On SIGTERM, keep accepting connections for this many seconds, closing each connection after its"
+    " next response, before the graceful shutdown starts. 0 disables lame duck mode.",
+    show_default=True,
+)
+@click.option(
     "--timeout-worker-healthcheck",
     type=int,
     default=5,
@@ -441,6 +449,7 @@ def main(
     limit_max_requests_jitter: int,
     timeout_keep_alive: int,
     timeout_graceful_shutdown: int | None,
+    timeout_lame_duck: float,
     timeout_worker_healthcheck: int,
     ssl_keyfile: str,
     ssl_certfile: str,
@@ -494,6 +503,7 @@ def main(
         limit_max_requests_jitter=limit_max_requests_jitter,
         timeout_keep_alive=timeout_keep_alive,
         timeout_graceful_shutdown=timeout_graceful_shutdown,
+        timeout_lame_duck=timeout_lame_duck,
         timeout_worker_healthcheck=timeout_worker_healthcheck,
         ssl_keyfile=ssl_keyfile,
         ssl_certfile=ssl_certfile,
@@ -550,6 +560,7 @@ def run(
     limit_max_requests_jitter: int = 0,
     timeout_keep_alive: int = 5,
     timeout_graceful_shutdown: int | None = None,
+    timeout_lame_duck: float = 0,
     timeout_worker_healthcheck: int = 5,
     ssl_keyfile: str | os.PathLike[str] | None = None,
     ssl_certfile: str | os.PathLike[str] | None = None,
@@ -607,6 +618,7 @@ def run(
         limit_max_requests_jitter=limit_max_requests_jitter,
         timeout_keep_alive=timeout_keep_alive,
         timeout_graceful_shutdown=timeout_graceful_shutdown,
+        timeout_lame_duck=timeout_lame_duck,
         timeout_worker_healthcheck=timeout_worker_healthcheck,
         ssl_keyfile=ssl_keyfile,
         ssl_certfile=ssl_certfile,

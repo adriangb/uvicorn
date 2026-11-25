@@ -152,3 +152,4 @@ For advanced TLS scenarios that the flags above don't cover (e.g., mutual TLS, c
 
 * `--timeout-keep-alive <int>` - Close Keep-Alive connections if no new data is received within this timeout (in seconds). **Default:** *5*.
 * `--timeout-graceful-shutdown <int>` - Maximum number of seconds to wait for graceful shutdown. After this timeout, the server will start terminating requests.
+* `--timeout-lame-duck <float>` - On `SIGTERM`, stay in [lame duck mode](server-behavior.md#lame-duck-mode) for this many seconds before the graceful shutdown starts: keep accepting connections, and close each connection after its next response. A second `SIGTERM`, or a `SIGINT`, starts the shutdown right away. `0` disables lame duck mode. **Default:** *0*.

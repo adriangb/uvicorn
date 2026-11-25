@@ -283,7 +283,7 @@ class HttpToolsProtocol(asyncio.Protocol):
             logger=self.logger,
             access_logger=self.access_logger,
             access_log=self.access_log,
-            default_headers=self.server_state.default_headers,
+            server_state=self.server_state,
             message_event=asyncio.Event(),
             expect_100_continue=self.expect_100_continue,
             keep_alive=http_version != "1.0" and self.parser.should_keep_alive(),
@@ -383,7 +383,7 @@ class RequestResponseCycle:
         logger: logging.Logger,
         access_logger: logging.Logger,
         access_log: bool,
-        default_headers: list[tuple[bytes, bytes]],
+        server_state: ServerState,
         message_event: asyncio.Event,
         expect_100_continue: bool,
         keep_alive: bool,
@@ -395,7 +395,8 @@ class RequestResponseCycle:
         self.logger = logger
         self.access_logger = access_logger
         self.access_log = access_log
-        self.default_headers = default_headers
+        self.server_state = server_state
+        self.default_headers = server_state.default_headers
         self.message_event = message_event
         self.on_response = on_response
 
@@ -475,6 +476,9 @@ class RequestResponseCycle:
 
             status_code = message["status"]
             headers = self.default_headers + list(message.get("headers", []))
+
+            if self.server_state.lame_duck:
+                self.keep_alive = False
 
             if self.access_log:
                 self.access_logger.info(

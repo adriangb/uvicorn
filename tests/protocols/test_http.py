@@ -262,6 +262,7 @@ class MockProtocol(asyncio.Protocol):
     timeout_keep_alive_task: asyncio.TimerHandle | None
     ws_protocol_class: type[WSProtocol] | None
     scope: Scope
+    server_state: ServerState
 
 
 def get_connected_protocol(
@@ -888,6 +889,55 @@ async def test_shutdown_during_request(http_protocol_cls: type[HTTPProtocol]):
     protocol.shutdown()  # type: ignore[attr-defined]
     await protocol.loop.run_one()
     assert b"HTTP/1.1 204 No Content" in protocol.transport.buffer
+    assert b"connection: close" in protocol.transport.buffer.lower()
+    assert protocol.transport.is_closing()
+
+
+async def test_lame_duck_response_carries_connection_close(http_protocol_cls: type[HTTPProtocol]):
+    app = Response("Hello, world", media_type="text/plain")
+
+    protocol = get_connected_protocol(app, http_protocol_cls)
+    protocol.server_state.lame_duck = True
+    protocol.data_received(SIMPLE_GET_REQUEST)
+    await protocol.loop.run_one()
+    assert b"HTTP/1.1 200 OK" in protocol.transport.buffer
+    assert protocol.transport.buffer.lower().count(b"connection: close") == 1
+    assert protocol.transport.is_closing()
+
+
+async def test_lame_duck_app_connection_close_header_is_not_duplicated(http_protocol_cls: type[HTTPProtocol]):
+    app = Response("Hello, world", media_type="text/plain", headers={"Connection": "close"})
+
+    protocol = get_connected_protocol(app, http_protocol_cls)
+    protocol.server_state.lame_duck = True
+    protocol.data_received(SIMPLE_GET_REQUEST)
+    await protocol.loop.run_one()
+    assert protocol.transport.buffer.lower().count(b"connection: close") == 1
+    assert protocol.transport.is_closing()
+
+
+async def test_lame_duck_error_response_carries_connection_close(http_protocol_cls: type[HTTPProtocol]):
+    async def app(scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable):
+        raise RuntimeError()
+
+    protocol = get_connected_protocol(app, http_protocol_cls)
+    protocol.server_state.lame_duck = True
+    protocol.data_received(SIMPLE_GET_REQUEST)
+    await protocol.loop.run_one()
+    assert b"HTTP/1.1 500 Internal Server Error" in protocol.transport.buffer
+    assert protocol.transport.buffer.lower().count(b"connection: close") == 1
+    assert protocol.transport.is_closing()
+
+
+async def test_lame_duck_max_concurrency_response_carries_connection_close(http_protocol_cls: type[HTTPProtocol]):
+    app = Response("Hello, world", media_type="text/plain")
+
+    protocol = get_connected_protocol(app, http_protocol_cls, limit_concurrency=1)
+    protocol.server_state.lame_duck = True
+    protocol.data_received(SIMPLE_GET_REQUEST)
+    await protocol.loop.run_one()
+    assert b"HTTP/1.1 503 Service Unavailable" in protocol.transport.buffer
+    assert protocol.transport.buffer.lower().count(b"connection: close") == 1
     assert protocol.transport.is_closing()
 
 
